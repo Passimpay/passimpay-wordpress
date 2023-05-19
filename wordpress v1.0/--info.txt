@@ -1,5 +1,0 @@
-1. Install plugin passimpay.io.zip to Wordpress and make it active.
-
-2. Go to Woocommerce settings page, Select tab payments and click to "Passimpay Payment Gateway" link.
-	Fill all settings fields. https://vvww.info/images/paspay/WooCommerce.jpg
-
