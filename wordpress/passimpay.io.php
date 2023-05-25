@@ -148,8 +148,8 @@ function passimpay_init_gateway_class() {
 				curl_setopt($curl, CURLOPT_POST, true);
 				curl_setopt($curl, CURLOPT_ENCODING, 'gzip');
 				curl_setopt($curl, CURLOPT_FOLLOWLOCATION, true);
-				curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
-				curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, false);
+				//curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
+				//curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, false);
 				$result = curl_exec($curl);
 				curl_close( $curl );
 				$result = json_decode($result, true);
@@ -191,8 +191,8 @@ function passimpay_init_gateway_class() {
 				curl_setopt($curl, CURLOPT_POST, true);
 				curl_setopt($curl, CURLOPT_ENCODING, 'gzip');
 				curl_setopt($curl, CURLOPT_FOLLOWLOCATION, true);
-				curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
-				curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, false);
+				//curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
+				//curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, false);
 				$result = curl_exec($curl);
 				curl_close( $curl );
 				$result = json_decode($result, true);
@@ -228,12 +228,12 @@ function passimpay_init_gateway_class() {
 				'fee' => $_POST['fee'], // network fee
 			];
 			if (isset($_POST['confirmations'])) $data['confirmations'] = $_POST['confirmations']; // number of network confirmations (Bitcoin, Litecoin, Dogecoin, Bitcoin Cash)
+			global $woocommerce;
+			$order = wc_get_order( $_REQUEST['order_id'] );
 			$payload = http_build_query($data);
 			if (!isset($hash) || hash_hmac('sha256', $payload, $this->secret_key) != $hash)
 				$order->add_order_note( 'Passimpay: Hash broken for order '.$_REQUEST['order_id'], true );
 			else {
-				global $woocommerce;
-				$order = wc_get_order( $_REQUEST['order_id'] );
 	  			$props = get_post_meta( $order_id, '_passimpay', 1 );
 				if( $props['passimpay']['amount'] > $_REQUEST['amount'] )
 					$order->add_order_note( 'Passimpay: Payed only part of order #' .$_REQUEST['order_id']. ': '. $_REQUEST['amount'] .' '. $props['passimpay']['paysys']['currency'] );
@@ -259,8 +259,8 @@ function passimpay_init_gateway_class() {
 			curl_setopt($curl, CURLOPT_POST, true);
 			curl_setopt($curl, CURLOPT_ENCODING, 'gzip');
 			curl_setopt($curl, CURLOPT_FOLLOWLOCATION, true);
-			curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
-			curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, false);
+			//curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
+			//curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, false);
 			$result = curl_exec($curl);
 			curl_close( $curl );
 			$result = json_decode($result, true);
@@ -268,13 +268,13 @@ function passimpay_init_gateway_class() {
 			return $result;
 		}
 
-		function thank_you_msg( $thank_you_msg ) {
+		public function thank_you_msg( $thank_you_msg ) {
 			$order_id = wc_get_order_id_by_order_key($_GET['key']);
 			$data = get_post_meta( $order_id, '_passimpay', 1 );
-			$thank_you_msg = '<div><img src="' . 'https://chart.googleapis.com/chart?cht=qr&chld=H|1&chs=120&chl='.urlencode($data['address']). '" height="120" style="float:left; margin-right:30px">';
-			$thank_you_msg.= '<p>Adress for a payment: <strong>' . $data['address'] . '</strong><br>Payment system: '.$data['paysys']['name'].'<br>
+			$thankYouMsg = '<div><img src="' . 'https://chart.googleapis.com/chart?cht=qr&chld=H|1&chs=120&chl='.urlencode($data['address']). '" height="120" style="float:left; margin-right:30px">';
+			$thankYouMsg.= '<p>Adress for a payment: <strong>' . $data['address'] . '</strong><br>Payment system: '.$data['paysys']['name'].'<br>
 				Total: '.$data['amount'].' '.$data['paysys']['currency'].' / '. $data['paysys']['platform'] .'</p></div><div style="clear:both;height:10px"></div>';
-			return $thank_you_msg;
+			return $thankYouMsg;
 		}
 
  	}
