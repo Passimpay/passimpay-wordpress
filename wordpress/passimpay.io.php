@@ -144,7 +144,7 @@ function passimpay_init_gateway_class() {
 				curl_setopt($curl, CURLOPT_HTTPHEADER, ['Content-Type: application/x-www-form-urlencoded']);
 				curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
 				curl_setopt($curl, CURLOPT_POSTFIELDS, $post_data);
-				curl_setopt($curl, CURLOPT_URL, 'https://passimpay.io/api/getpaymentwallet');
+				curl_setopt($curl, CURLOPT_URL, 'https://api.passimpay.io/getpaymentwallet');
 				curl_setopt($curl, CURLOPT_POST, true);
 				curl_setopt($curl, CURLOPT_ENCODING, 'gzip');
 				curl_setopt($curl, CURLOPT_FOLLOWLOCATION, true);
@@ -187,7 +187,7 @@ function passimpay_init_gateway_class() {
 				curl_setopt($curl, CURLOPT_HTTPHEADER, ['Content-Type: application/x-www-form-urlencoded']);
 				curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
 				curl_setopt($curl, CURLOPT_POSTFIELDS, $post_data);
-				curl_setopt($curl, CURLOPT_URL, 'https://passimpay.io/api/createorder');
+				curl_setopt($curl, CURLOPT_URL, 'https://api.passimpay.io/createorder');
 				curl_setopt($curl, CURLOPT_POST, true);
 				curl_setopt($curl, CURLOPT_ENCODING, 'gzip');
 				curl_setopt($curl, CURLOPT_FOLLOWLOCATION, true);
@@ -245,7 +245,7 @@ function passimpay_init_gateway_class() {
 
 		private function getCurList()
 		{
-			$url = 'https://passimpay.io/api/currencies';
+			$url = 'https://api.passimpay.io/currencies';
 			$payload = http_build_query(['platform_id' => $this->platform_id ]);
 			$hash = hash_hmac('sha256', $payload, $this->secret_key);
 			$data = [ 'platform_id' => $this->platform_id, 'hash' => $hash,];
