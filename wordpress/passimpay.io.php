@@ -11,6 +11,9 @@
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
+add_action( 'init', function () {
+    load_plugin_textdomain( 'passimpay', false, dirname( plugin_basename( __FILE__ ) ) . '/languages' );
+} );
 
 add_action( 'before_woocommerce_init', function () {
     if ( class_exists( '\Automattic\WooCommerce\Utilities\FeaturesUtil' ) ) {
@@ -35,7 +38,7 @@ function passimpay_remote_post( $url, $body_query, $is_json = false, $headers = 
     }
     
     $args = array(
-        'timeout'     => 30,
+        'timeout'     => 30, // Увеличим таймаут
         'body'        => $body,
         'headers'     => $headers,
         'redirection' => 5,
@@ -43,7 +46,20 @@ function passimpay_remote_post( $url, $body_query, $is_json = false, $headers = 
         'user-agent'  => 'WooCommerce/' . WC()->version . '; ' . get_site_url()
     );
     
+    // Детальное логирование запроса
+    error_log('Passimpay API Request to: ' . $url);
+    error_log('Passimpay Request Headers: ' . print_r($headers, true));
+    error_log('Passimpay Request Body: ' . $body);
+    
     $response = wp_remote_post( $url, $args );
+    
+    // Логирование ответа
+    if ( is_wp_error( $response ) ) {
+        error_log('Passimpay Request Error: ' . $response->get_error_message());
+    } else {
+        error_log('Passimpay Response Code: ' . wp_remote_retrieve_response_code( $response ));
+        error_log('Passimpay Response Body: ' . wp_remote_retrieve_body( $response ));
+    }
     
     return $response;
 }
@@ -81,24 +97,26 @@ add_action( 'plugins_loaded', function() {
         public $secret_key;
         public $platform_id;
         public $mode;
+        public $payment_type;
 
         public function __construct() {
             $this->id                 = 'passimpay';
-            $this->icon               = plugins_url( 'settings_logo_en.svg', __FILE__ );
-            $this->has_fields         = true;
+            $this->has_fields          = true;
             $this->method_title       = 'Passimpay Payment Gateway';
-            $this->method_description = 'Accept 21+ cryptocurrencies via Passimpay.';
+            $this->method_description = 'Accept payments via Passimpay (card and/or crypto).';
             $this->supports           = array( 'products' );
 
             $this->init_form_fields();
             $this->init_settings();
 
-            $this->title        = $this->get_option( 'title', 'Passimpay (Pay with cryptocurrencies)' );
-            $this->description  = $this->get_option( 'description', 'Pay with your preferred cryptocurrency via Passimpay.' );
+            $this->title        = $this->get_option( 'title', $this->get_default_title() );
+            $this->description  = $this->get_option( 'description', $this->get_default_description() );
             $this->enabled      = $this->get_option( 'enabled', 'no' );
             $this->secret_key   = $this->get_option( 'secret_key' );
             $this->platform_id  = $this->get_option( 'platform_id' );
             $this->mode         = intval( $this->get_option( 'mode', 1 ) );
+            $this->payment_type = intval( $this->get_option( 'payment_type', 0 ) ); // 0=both, 1=crypto, 2=card
+            $this->icon         = $this->get_icon_url();
 
             add_action( 'woocommerce_update_options_payment_gateways_' . $this->id, array( $this, 'process_admin_options' ) );
             add_action( 'woocommerce_api_passimpay', array( $this, 'webhook' ) );
@@ -107,8 +125,40 @@ add_action( 'plugins_loaded', function() {
             add_action( 'wp_ajax_nopriv_set_passimpay_id', array( $this, 'ajax_set_passimpay_id' ) );
         }
 
+        /** Payment type: 0 = card + crypto, 1 = crypto only, 2 = card only (API createorder type) */
+        public function get_default_title() {
+            $t = intval( $this->get_option( 'payment_type', 0 ) );
+            $titles = array(
+                0 => __( 'Pay with card or crypto via Passimpay', 'passimpay' ),
+                1 => __( 'Pay with cryptocurrency via Passimpay', 'passimpay' ),
+                2 => __( 'Pay with bank card via Passimpay', 'passimpay' ),
+            );
+            return isset( $titles[ $t ] ) ? $titles[ $t ] : $titles[0];
+        }
+
+        public function get_default_description() {
+            return __( 'You will be redirected to the secure payment page.', 'passimpay' );
+        }
+
+        /** Icon URL by payment type: img/logo.svg, img/logo_crypto.svg, img/logo_card.svg */
+        public function get_icon_url() {
+            $t   = intval( $this->get_option( 'payment_type', 0 ) );
+            $map = array( 0 => 'logo.svg', 1 => 'logo_crypto.svg', 2 => 'logo_card.svg' );
+            $file = isset( $map[ $t ] ) ? $map[ $t ] : 'logo.svg';
+            $img_dir = plugin_dir_path( __FILE__ ) . 'img/';
+            $path = $img_dir . $file;
+            if ( ! file_exists( $path ) ) {
+                $file = 'logo.svg';
+                if ( ! file_exists( $img_dir . $file ) ) {
+                    return plugins_url( 'settings_logo_en.svg', __FILE__ );
+                }
+            }
+            return plugins_url( 'img/' . $file, __FILE__ );
+        }
+
         public function init_form_fields(){
             $webhook_url = add_query_arg('wc-api', 'passimpay', home_url('/'));
+            $card_warning = __( 'Before enabling card payments, ensure that «Cards/Bank transfer» is turned on in your Passimpay platform settings.', 'passimpay' );
             
             $this->form_fields = array(
                 'enabled' => array(
@@ -125,18 +175,30 @@ add_action( 'plugins_loaded', function() {
                     'custom_attributes' => array('readonly' => 'readonly'),
                     'css' => 'width: 100%; font-family: monospace; background: #f9f9f9;'
                 ),
+                'payment_type' => array(
+                    'title'       => __( 'Payment options', 'passimpay' ),
+                    'type'        => 'select',
+                    'description' => __( 'What to show on the payment page: card, crypto, or both. Must match your Passimpay dashboard.', 'passimpay' ) . ' <br><br><strong style="color:#856404;">&#9432; ' . esc_html( $card_warning ) . '</strong>',
+                    'options'     => array(
+                        0 => __( 'Card and cryptocurrency', 'passimpay' ),
+                        1 => __( 'Cryptocurrency only', 'passimpay' ),
+                        2 => __( 'Bank card only', 'passimpay' ),
+                    ),
+                    'default'     => 0,
+                ),
                 'title' => array(
                     'title'       => 'Title',
                     'type'        => 'text',
                     'description' => 'Shown to the customer at checkout.',
-                    'default'     => 'Passimpay (Pay with cryptocurrencies)',
+                    'default'     => '',
                     'desc_tip'    => true,
+                    'placeholder' => $this->get_default_title(),
                 ),
                 'description' => array(
                     'title'       => 'Description',
                     'type'        => 'textarea',
                     'description' => 'Shown to the customer at checkout.',
-                    'default'     => 'Pay with your preferred cryptocurrency via our Passimpay gateway.',
+                    'default'     => $this->get_default_description(),
                 ),
                 'secret_key' => array(
                     'title' => 'Secret Key',
@@ -204,6 +266,13 @@ add_action( 'plugins_loaded', function() {
         }
 
         public function process_payment( $order_id ) {
+            // Временно выводим debug информацию
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                wc_add_notice('🔧 DEBUG: Passimpay process_payment started for order: ' . $order_id, 'notice');
+                wc_add_notice('🔧 DEBUG: Mode: ' . $this->mode, 'notice');
+                wc_add_notice('🔧 DEBUG: Platform ID: ' . $this->platform_id, 'notice');
+            }
+            
             $order = wc_get_order( $order_id );
 
             if ( intval( $this->mode ) === 1 ) {
@@ -241,7 +310,7 @@ add_action( 'plugins_loaded', function() {
 
                 $data = array(
                     'paymentId'  => $payment_id,
-                    'platformId' => $this->platform_id,
+                    'platformId' => $this->platform_id,  
                     'orderId'    => strval($order_id),
                 );
                 $payload       = http_build_query( $data );
@@ -266,6 +335,7 @@ add_action( 'plugins_loaded', function() {
                         'payment_id'  => $payment_id,
                     );
                     
+                    error_log('Passimpay Mode 1 - Saving Meta Data: ' . print_r($meta, true));
                     update_post_meta( $order_id, '_passimpay', $meta );
 
                     $order->update_status( 'on-hold', 'Passimpay: awaiting crypto payment.' );
@@ -282,46 +352,79 @@ add_action( 'plugins_loaded', function() {
                 }
 
             } else {
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    wc_add_notice('🔧 DEBUG: Processing Mode 2 (Redirect)', 'notice');
+                }
+                
                 $shop_currency = get_woocommerce_currency();
                 $order_total   = floatval( $order->get_total() );
                 
+                $payment_type = intval( $this->get_option( 'payment_type', 0 ) ); // 0=both, 1=crypto, 2=card
                 $request_data = array(
                     'platformId' => intval($this->platform_id),
                     'orderId'    => strval($order_id),
                     'amount'     => number_format( $order_total, 2, '.', '' ),
                     'symbol'     => strtoupper($shop_currency),
-                    'type'       => 1,
+                    'type'       => $payment_type,
                 );
                 
+                // Кодируем в JSON
                 $payload = json_encode($request_data, JSON_UNESCAPED_SLASHES);
                 
+                // Формируем подпись как в PrestaShop
                 $signature_string = intval($this->platform_id) . ';' . $payload . ';' . $this->secret_key;
                 $signature = hash_hmac('sha256', $signature_string, $this->secret_key);
                 
                 $headers = array(
                     'x-signature' => $signature,
-                    'Content-Type' => 'application/json'
+                    'Content-Type' => 'application/json'  // Явно указываем Content-Type
                 );
                 
-                $result = passimpay_remote_post(
-                    'https://api.passimpay.io/v2/createorder',
-                    $payload,
-                    true,
-                    $headers
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    wc_add_notice('🔧 DEBUG: Request Data: ' . print_r($request_data, true), 'notice');
+                    wc_add_notice('🔧 DEBUG: Payload: ' . $payload, 'notice');
+                    wc_add_notice('🔧 DEBUG: Signature: ' . $signature, 'notice');
+                }
+                
+                // ВАЖНО: Используем v2 endpoint как в PrestaShop
+                $result = passimpay_remote_post( 
+                    'https://api.passimpay.io/v2/createorder', // ДОБАВЬТЕ /v2/
+                    $payload, 
+                    true, 
+                    $headers 
                 );
                 
+                // Детальная обработка ответа
                 if ( is_wp_error( $result ) ) {
                     $error_msg = 'Passimpay connection error: ' . $result->get_error_message();
                     wc_add_notice( $error_msg, 'error' );
+                    if (defined('WP_DEBUG') && WP_DEBUG) {
+                        wc_add_notice('🔧 DEBUG: WordPress Error: ' . $result->get_error_code(), 'error');
+                        wc_add_notice('🔧 DEBUG: WordPress Error Message: ' . $result->get_error_message(), 'error');
+                    }
                     return;
                 }
                 
                 $response_code = wp_remote_retrieve_response_code( $result );
                 $response_body = wp_remote_retrieve_body( $result );
+                $response_headers = wp_remote_retrieve_headers( $result );
+                
+                // Детальный лог для отладки
+                error_log('Passimpay API Response Code: ' . $response_code);
+                error_log('Passimpay API Response Body: ' . $response_body);
+                
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    wc_add_notice('🔧 DEBUG: API Response Code: ' . $response_code, 'notice');
+                    wc_add_notice('🔧 DEBUG: API Response: ' . $response_body, 'notice');
+                }
 
                 $json = json_decode( $response_body, true );
                 
                 if ( isset( $json['result'] ) && intval( $json['result'] ) === 1 && ! empty( $json['url'] ) ) {
+                    if (defined('WP_DEBUG') && WP_DEBUG) {
+                        wc_add_notice('🔧 DEBUG: Success! Redirecting to: ' . $json['url'], 'success');
+                    }
+                    
                     $meta = array(
                         'url'      => esc_url_raw( $json['url'] ),
                         'mode'     => 2,
@@ -337,6 +440,14 @@ add_action( 'plugins_loaded', function() {
                 } else {
                     $msg = isset( $json['message'] ) ? $json['message'] : 'Unknown error';
                     $full_error = 'Error in payment process: ' . $msg;
+                    
+                    // Детальная информация об ошибке
+                    if (defined('WP_DEBUG') && WP_DEBUG) {
+                        wc_add_notice('🔧 DEBUG: Full API Response: ' . $response_body, 'error');
+                        if (isset($json['error'])) {
+                            wc_add_notice('🔧 DEBUG: API Error Details: ' . $json['error'], 'error');
+                        }
+                    }
                     
                     wc_add_notice( $full_error, 'error' );
                     return;
@@ -355,6 +466,11 @@ add_action( 'plugins_loaded', function() {
             $signature_string = intval($this->platform_id) . ';' . $payload . ';' . $this->secret_key;
             $signature = hash_hmac('sha256', $signature_string, $this->secret_key);
             
+            error_log('Passimpay Check Order Request: ' . print_r($data, true));
+            error_log('Passimpay Check Order Payload: ' . $payload);
+            error_log('Passimpay Check Order Signature String: ' . $signature_string);
+            error_log('Passimpay Check Order Signature: ' . $signature);
+            
             $response = wp_remote_post('https://api.passimpay.io/v2/orderstatus', array(
                 'timeout'     => 20,
                 'body'        => $payload,
@@ -367,17 +483,26 @@ add_action( 'plugins_loaded', function() {
             ));
             
             if ( is_wp_error( $response ) ) {
+                error_log('Passimpay Check Order Status Error: ' . $response->get_error_message());
                 return false;
             }
             
             $response_body = wp_remote_retrieve_body($response);
+            $response_code = wp_remote_retrieve_response_code($response);
+            
+            error_log('Passimpay Check Order Response Code: ' . $response_code);
+            error_log('Passimpay Check Order Response Body: ' . $response_body);
+            
             $json = json_decode($response_body, true);
+            error_log('Passimpay Status Response: ' . print_r($json, true));
             
             return $json;
         }
 
         
         public function webhook() {
+            error_log('Passimpay Webhook Received: ' . print_r($_POST, true));
+            
             $hash = isset($_POST['hash']) ? sanitize_text_field(wp_unslash($_POST['hash'])) : '';
             $data = array(
                 'platform_id'   => isset($_POST['platform_id']) ? intval($_POST['platform_id']) : 0,
@@ -396,12 +521,14 @@ add_action( 'plugins_loaded', function() {
 
             $order_id = $data['order_id'];
             if (!$order_id) {
+                error_log('Passimpay Error: Order ID missing');
                 status_header(400);
                 exit('Order ID missing');
             }
             
             $order = wc_get_order($order_id);
             if (!$order) {
+                error_log('Passimpay Error: Order not found - ' . $order_id);
                 status_header(404);
                 exit('Order not found');
             }
@@ -412,6 +539,7 @@ add_action( 'plugins_loaded', function() {
             if (!$hash || $calc != $hash) {
                 $error_msg = 'Passimpay: invalid webhook signature. Calculated: ' . $calc . ', Received: ' . $hash;
                 $order->add_order_note($error_msg);
+                error_log($error_msg);
                 status_header(403);
                 exit('Invalid signature');
             }
@@ -425,14 +553,20 @@ add_action( 'plugins_loaded', function() {
             );
             $order->add_order_note($transaction_msg);
             
+            // Проверяем статус заказа через API Passimpay
             $status_response = $this->check_order_status($order_id);
+            error_log('Passimpay API Status Response: ' . print_r($status_response, true));
             
             if ($status_response && isset($status_response['result']) && intval($status_response['result']) === 1) {
+                // API ответил корректно - используем только его статус
                 $payment_status = isset($status_response['status']) ? $status_response['status'] : '';
                 $amount_paid = isset($status_response['amountPaid']) ? floatval($status_response['amountPaid']) : 0;
                 $currency = isset($status_response['currency']) ? $status_response['currency'] : 'USD';
                 
+                error_log('Passimpay: API status: ' . $payment_status . ', Amount paid: ' . $amount_paid . ' ' . $currency);
+                
                 if ($payment_status === 'paid') {
+                    // API подтверждает полную оплату
                     if ($order->get_status() !== 'completed' && $order->get_status() !== 'processing') {
                         $order->payment_complete($data['txhash']);
                         $success_msg = sprintf(
@@ -442,8 +576,12 @@ add_action( 'plugins_loaded', function() {
                             $data['txhash']
                         );
                         $order->add_order_note($success_msg);
+                        error_log($success_msg);
+                    } else {
+                        error_log('Passimpay: Order already completed, skipping payment_complete()');
                     }
                 } else if ($payment_status === 'wait') {
+                    // API показывает что еще ждем доплаты - только заметка, статус не меняем
                     $wait_msg = sprintf(
                         'Passimpay: Partial payment received (API status: wait). Paid so far: %s %s. Transaction: %s',
                         $amount_paid,
@@ -451,7 +589,9 @@ add_action( 'plugins_loaded', function() {
                         $data['txhash']
                     );
                     $order->add_order_note($wait_msg);
+                    error_log($wait_msg);
                 } else {
+                    // Неизвестный статус от API
                     $unknown_msg = sprintf(
                         'Passimpay: Unknown payment status: %s, Amount paid: %s %s. Transaction: %s',
                         $payment_status,
@@ -460,10 +600,13 @@ add_action( 'plugins_loaded', function() {
                         $data['txhash']
                     );
                     $order->add_order_note($unknown_msg);
+                    error_log($unknown_msg);
                 }
             } else {
+                // API не ответил или вернул ошибку
                 $error_msg = 'Passimpay: Unable to verify payment status via API. Transaction recorded: ' . $data['txhash'];
                 $order->add_order_note($error_msg);
+                error_log($error_msg);
             }
             
             status_header(200);
@@ -486,8 +629,8 @@ add_action( 'plugins_loaded', function() {
                 return;
             }
             
-            if ( ! isset( $data['paysys']['name'] ) ||
-                 ! isset( $data['paysys']['currency'] ) ||
+            if ( ! isset( $data['paysys']['name'] ) || 
+                 ! isset( $data['paysys']['currency'] ) || 
                  ! isset( $data['paysys']['platform'] ) ) {
                 return;
             }
@@ -507,6 +650,47 @@ add_action( 'plugins_loaded', function() {
             </div>
             <?php
         }
+
+//         public function thank_you_msg( $text, $order ) {
+//             if ( ! is_object( $order ) || ! method_exists( $order, 'get_payment_method' ) ) {
+//                 return $text;
+//             }
+
+//             if ( $order->get_payment_method() !== $this->id ) {
+//                 return $text;
+//             }
+
+//             if ( ! method_exists( $order, 'get_id' ) ) {
+//                 return $text;
+//             }
+            
+//             $order_id = $order->get_id();
+//             if ( ! $order_id ) {
+//                 return $text;
+//             }
+
+//             $data = get_post_meta( $order_id, '_passimpay', true );
+
+//             if ( ! is_array( $data ) || empty( $data['address'] ) || empty( $data['paysys'] ) ) {
+//                 return $text;
+//             }
+
+//             if ( ! isset( $data['paysys']['name'] ) || 
+//                  ! isset( $data['paysys']['currency'] ) || 
+//                  ! isset( $data['paysys']['platform'] ) ) {
+//                 return $text;
+//             }
+
+//             $qr = 'https://payment.passimpay.io/qr-code/default/' . rawurlencode( $data['address'] );
+//             $html  = '<div style="display:flex;gap:20px;align-items:flex-start;margin:10px 0;">';
+//             $html .= '<img src="'.esc_url( $qr ).'" height="120" alt="QR">';
+//             $html .= '<p style="margin:0;">';
+//             $html .= 'Address for payment: <strong>'.esc_html( $data['address'] ).'</strong><br>';
+//             $html .= 'Payment system: '.esc_html( $data['paysys']['name'] ).'<br>';
+//             $html .= 'Total: '.esc_html( wc_format_decimal( $data['amount'], 8 ) ).' '.esc_html( $data['paysys']['currency'] ).' / '.esc_html( $data['paysys']['platform'] );
+//             $html .= '</p></div>';
+//             return $html;
+//         }
 
         public function ajax_set_passimpay_id() {
             check_ajax_referer( 'wc-passimpay', 'nonce' );
@@ -531,7 +715,7 @@ function passimpay_checkout_field_process( $serialized_post ) {
     
     if ( $data['payment_method'] === 'passimpay' && ! empty( $data['passimpay_id'] ) ) {
         WC()->session->set( 'passimpay_id', sanitize_text_field( $data['passimpay_id'] ) );
-    }
+    } 
     elseif ( $data['payment_method'] !== 'passimpay' && WC()->session->get( 'passimpay_id' ) ) {
         WC()->session->set( 'passimpay_id', null );
     }
@@ -659,7 +843,7 @@ JS;
             public function get_payment_method_data() {
                 $title       = $this->gateway ? $this->gateway->title       : 'Passimpay';
                 $description = $this->gateway ? $this->gateway->description : '';
-                $icon        = plugins_url( 'settings_logo_en.svg', __FILE__ );;
+                $icon        = $this->gateway && method_exists( $this->gateway, 'get_icon_url' ) ? $this->gateway->get_icon_url() : plugins_url( 'img/logo.svg', __FILE__ );
                 $mode        = $this->gateway ? intval( $this->gateway->mode ) : 1;
 
                 $platform_id = isset( $this->settings['platform_id'] ) ? $this->settings['platform_id'] : '';
