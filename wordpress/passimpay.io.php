@@ -4,7 +4,7 @@
  * Plugin URI: https://passimpay.io/
  * Description: Accept cryptocurrency payments via Passimpay.
  * Author: PassimPay
- * Version: 2.0.2
+ * Version: 2.0.3
  * Requires at least: 6.0
  * Requires PHP: 7.4
  */
@@ -48,8 +48,7 @@ function passimpay_remote_post( $url, $body_query, $is_json = false, $headers = 
     
     // Детальное логирование запроса
     error_log('Passimpay API Request to: ' . $url);
-    error_log('Passimpay Request Headers: ' . print_r($headers, true));
-    error_log('Passimpay Request Body: ' . $body);
+    // Заголовки и тело содержат подписи запросов, поэтому не записываем их в журнал.
     
     $response = wp_remote_post( $url, $args );
     
@@ -383,7 +382,6 @@ add_action( 'plugins_loaded', function() {
                 if (defined('WP_DEBUG') && WP_DEBUG) {
                     wc_add_notice('🔧 DEBUG: Request Data: ' . print_r($request_data, true), 'notice');
                     wc_add_notice('🔧 DEBUG: Payload: ' . $payload, 'notice');
-                    wc_add_notice('🔧 DEBUG: Signature: ' . $signature, 'notice');
                 }
                 
                 // ВАЖНО: Используем v2 endpoint как в PrestaShop
@@ -468,8 +466,7 @@ add_action( 'plugins_loaded', function() {
             
             error_log('Passimpay Check Order Request: ' . print_r($data, true));
             error_log('Passimpay Check Order Payload: ' . $payload);
-            error_log('Passimpay Check Order Signature String: ' . $signature_string);
-            error_log('Passimpay Check Order Signature: ' . $signature);
+            // Строка подписи содержит секретный ключ и не должна попадать в журнал.
             
             $response = wp_remote_post('https://api.passimpay.io/v2/orderstatus', array(
                 'timeout'     => 20,
@@ -501,22 +498,108 @@ add_action( 'plugins_loaded', function() {
 
         
         public function webhook() {
-            error_log('Passimpay Webhook Received: ' . print_r($_POST, true));
-            
-            $hash = isset($_POST['hash']) ? sanitize_text_field(wp_unslash($_POST['hash'])) : '';
-            $data = array(
-                'platform_id'   => isset($_POST['platform_id']) ? intval($_POST['platform_id']) : 0,
-                'payment_id'    => isset($_POST['payment_id']) ? intval($_POST['payment_id']) : 0,
-                'order_id'      => isset($_POST['order_id']) ? intval($_POST['order_id']) : 0,
-                'amount'        => isset($_POST['amount']) ? $_POST['amount'] : 0,
-                'txhash'        => isset($_POST['txhash']) ? sanitize_text_field(wp_unslash($_POST['txhash'])) : '',
-                'address_from'  => isset($_POST['address_from']) ? sanitize_text_field(wp_unslash($_POST['address_from'])) : '',
-                'address_to'    => isset($_POST['address_to']) ? sanitize_text_field(wp_unslash($_POST['address_to'])) : '',
-                'fee'           => isset($_POST['fee']) ? sanitize_text_field(wp_unslash($_POST['fee'])) : '',
-            );
-            
-            if (isset($_POST['confirmations'])) {
-                $data['confirmations'] = intval($_POST['confirmations']);
+            $raw_body     = file_get_contents( 'php://input' );
+            $json_data    = json_decode( $raw_body, true );
+            $is_v2_webhook = is_array( $json_data ) && isset( $json_data['platformId'] );
+
+            if ( $is_v2_webhook ) {
+                // Не преобразуем некорректные идентификаторы в номера существующих заказов.
+                $order_id_value = isset( $json_data['orderId'] ) ? $json_data['orderId'] : null;
+                if ( ! is_int( $json_data['platformId'] ) || $json_data['platformId'] <= 0 ||
+                     ( ! is_string( $order_id_value ) && ! is_int( $order_id_value ) ) ||
+                     ! preg_match( '/^[1-9][0-9]*$/D', (string) $order_id_value ) ||
+                     filter_var( $order_id_value, FILTER_VALIDATE_INT, array( 'options' => array( 'min_range' => 1 ) ) ) === false ) {
+                    status_header( 400 );
+                    exit( 'Invalid platform or order ID' );
+                }
+
+                foreach ( array( 'amount', 'txhash', 'addressFrom', 'addressTo', 'feeService' ) as $field ) {
+                    if ( array_key_exists( $field, $json_data ) && ! is_string( $json_data[ $field ] ) ) {
+                        status_header( 400 );
+                        exit( 'Invalid webhook field' );
+                    }
+                }
+                if ( ( isset( $json_data['paymentId'] ) && ( ! is_int( $json_data['paymentId'] ) || $json_data['paymentId'] <= 0 ) ) ||
+                     ( isset( $json_data['confirmations'] ) && ( ! is_int( $json_data['confirmations'] ) || $json_data['confirmations'] < 0 ) ) ) {
+                    status_header( 400 );
+                    exit( 'Invalid webhook field' );
+                }
+
+                $received_signature = isset( $_SERVER['HTTP_X_SIGNATURE'] )
+                    ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_X_SIGNATURE'] ) )
+                    : '';
+
+                if ( ! $received_signature && function_exists( 'getallheaders' ) ) {
+                    foreach ( getallheaders() as $header_name => $header_value ) {
+                        if ( strtolower( $header_name ) === 'x-signature' ) {
+                            $received_signature = sanitize_text_field( $header_value );
+                            break;
+                        }
+                    }
+                }
+
+                $platform_id = isset( $json_data['platformId'] ) ? intval( $json_data['platformId'] ) : 0;
+                if ( $platform_id !== intval( $this->platform_id ) ) {
+                    error_log( 'Passimpay Error: Platform ID mismatch' );
+                    status_header( 400 );
+                    exit( 'Platform ID mismatch' );
+                }
+
+                // Сериализуем тело для проверки подписи по PHP-примеру PassimPay.
+                $serialized_body = json_encode( $json_data );
+                $signature_contract = intval( $this->platform_id ) . ';' . $serialized_body . ';' . $this->secret_key;
+                $calculated_signature = hash_hmac( 'sha256', $signature_contract, $this->secret_key );
+
+                if ( ! $received_signature || ! hash_equals( $calculated_signature, $received_signature ) ) {
+                    error_log( 'Passimpay Error: Invalid v2 webhook signature' );
+                    status_header( 400 );
+                    exit( 'Invalid signature' );
+                }
+
+                $data = array(
+                    'platform_id'  => $platform_id,
+                    'payment_id'   => isset( $json_data['paymentId'] ) ? intval( $json_data['paymentId'] ) : 0,
+                    'order_id'     => isset( $json_data['orderId'] ) ? absint( $json_data['orderId'] ) : 0,
+                    'amount'       => isset( $json_data['amount'] ) ? sanitize_text_field( $json_data['amount'] ) : '0',
+                    'txhash'       => isset( $json_data['txhash'] ) ? sanitize_text_field( $json_data['txhash'] ) : '',
+                    'address_from' => isset( $json_data['addressFrom'] ) ? sanitize_text_field( $json_data['addressFrom'] ) : '',
+                    'address_to'   => isset( $json_data['addressTo'] ) ? sanitize_text_field( $json_data['addressTo'] ) : '',
+                    'fee'          => isset( $json_data['feeService'] ) ? sanitize_text_field( $json_data['feeService'] ) : '',
+                );
+
+                if ( isset( $json_data['confirmations'] ) ) {
+                    $data['confirmations'] = intval( $json_data['confirmations'] );
+                }
+            } else {
+                // Обрабатываем существующий формат уведомлений из POST-формы.
+                $hash = isset( $_POST['hash'] ) ? sanitize_text_field( wp_unslash( $_POST['hash'] ) ) : '';
+                $data = array(
+                    'platform_id'  => isset( $_POST['platform_id'] ) ? intval( $_POST['platform_id'] ) : 0,
+                    'payment_id'   => isset( $_POST['payment_id'] ) ? intval( $_POST['payment_id'] ) : 0,
+                    'order_id'     => isset( $_POST['order_id'] ) ? absint( $_POST['order_id'] ) : 0,
+                    'amount'       => isset( $_POST['amount'] ) ? sanitize_text_field( wp_unslash( $_POST['amount'] ) ) : '0',
+                    'txhash'       => isset( $_POST['txhash'] ) ? sanitize_text_field( wp_unslash( $_POST['txhash'] ) ) : '',
+                    'address_from' => isset( $_POST['address_from'] ) ? sanitize_text_field( wp_unslash( $_POST['address_from'] ) ) : '',
+                    'address_to'   => isset( $_POST['address_to'] ) ? sanitize_text_field( wp_unslash( $_POST['address_to'] ) ) : '',
+                    'fee'          => isset( $_POST['fee'] ) ? sanitize_text_field( wp_unslash( $_POST['fee'] ) ) : '',
+                );
+
+                if ( isset( $_POST['confirmations'] ) ) {
+                    $data['confirmations'] = intval( $_POST['confirmations'] );
+                }
+
+                if ( $data['platform_id'] !== intval( $this->platform_id ) ) {
+                    status_header( 400 );
+                    exit( 'Platform ID mismatch' );
+                }
+
+                $legacy_payload = http_build_query( $data );
+                $legacy_signature = hash_hmac( 'sha256', $legacy_payload, $this->secret_key );
+                if ( ! $hash || ! hash_equals( $legacy_signature, $hash ) ) {
+                    error_log( 'Passimpay Error: Invalid legacy webhook signature' );
+                    status_header( 400 );
+                    exit( 'Invalid signature' );
+                }
             }
 
             $order_id = $data['order_id'];
@@ -533,15 +616,9 @@ add_action( 'plugins_loaded', function() {
                 exit('Order not found');
             }
 
-            $payload = http_build_query($data);
-            $calc = hash_hmac('sha256', $payload, $this->secret_key);
-            
-            if (!$hash || $calc != $hash) {
-                $error_msg = 'Passimpay: invalid webhook signature. Calculated: ' . $calc . ', Received: ' . $hash;
-                $order->add_order_note($error_msg);
-                error_log($error_msg);
-                status_header(403);
-                exit('Invalid signature');
+            if ( $order->get_payment_method() !== $this->id ) {
+                status_header( 400 );
+                exit( 'Payment method mismatch' );
             }
 
             $transaction_msg = sprintf(
